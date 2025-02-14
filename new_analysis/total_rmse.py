@@ -1,11 +1,41 @@
 import os
 import netCDF4 as nc
 import numpy as np
+import json
 
 def get_t2m(file_path):
     with nc.Dataset(file_path) as fid:
         t2m = fid.variables['TREFHT'][:]
     return t2m
+
+def get_precip(file_path):
+    with nc.Dataset(file_path) as fid:
+        precip = fid.variables['PRECC'][:]*24*3600*1000
+    return precip
+
+def get_Q850(file_path):
+    with nc.Dataset(file_path) as fid:
+        Q850 = fid.variables['Q'][0,23]
+        if np.all(Q850 == Q850.flatten()[0]):
+            print(f"Constant Q850 in {file_path}")
+    return Q850
+
+def get_Q500(file_path):
+    with nc.Dataset(file_path) as fid:
+        Q500 = fid.variables['Q'][0,18]
+        if np.all(Q500 == Q500.flatten()[0]):
+            print(f"Constant Q500 in {file_path}")
+    return Q500
+
+def get_T850(file_path):
+    with nc.Dataset(file_path) as fid:
+        T850 = fid.variables['T'][0,23]
+    return T850
+
+def get_T500(file_path):
+    with nc.Dataset(file_path) as fid:
+        T500 = fid.variables['T'][0,18]
+    return T500
 
 def area_RMSE(model, obs, lat):
     '''
@@ -28,9 +58,22 @@ def area_RMSE(model, obs, lat):
     
     return np.sqrt(bias_2_mean)
 
-def compute_annual_rmse(spcam_path, model_path):
+def spatial_correlation(x, y, lat):
+    # Normalize by weights
+    weights = np.cos(np.deg2rad(lat))[:,np.newaxis]
+    x_weighted = x * weights 
+    y_weighted = y * weights
+    x_weighted = x_weighted / np.sum(weights*144)
+    y_weighted = y_weighted / np.sum(weights*144)
+        
+    # Use np.corrcoef with weighted data
+    correlation_matrix = np.corrcoef(x_weighted.flatten(), y_weighted.flatten())
+    return correlation_matrix[0,1]
+    
+def compute_annual_rmse(spcam_path, model_path, year=1998):
     """
-    Compute seasonal and annual RMSE and correlation between SPCAM and a model for the year 1998
+    Compute seasonal and annual RMSE and correlation between SPCAM and a model for the specified year
+    for multiple variables: T2m, precipitation, Q850, Q500, T850, T500
     
     Parameters:
     -----------
@@ -38,98 +81,111 @@ def compute_annual_rmse(spcam_path, model_path):
         Path to SPCAM data directory
     model_path : str 
         Path to model data directory
+    year : int, optional
+        Year to analyze (default: 1998)
         
     Returns:
     --------
     metrics : dict
-        Dictionary containing RMSE and correlation for each season and annual mean
+        Dictionary containing RMSE and correlation for each season and variable
     """
-    sample_data = nc.Dataset(os.path.join(spcam_path, f"spcam.baseline.cam.h0.1998-01.nc"))
+    sample_data = nc.Dataset(os.path.join(spcam_path, f"spcam.baseline.cam.h0.{year}-01.nc"))
     lat = sample_data.variables["lat"][:]
     
-    # Initialize monthly data arrays
-    monthly_spcam = []
-    monthly_model = []
+    # Define variables and their getter functions
+    variables = {
+        't2m': get_t2m,
+        'precip': get_precip,
+        'q850': get_Q850,
+        'q500': get_Q500,
+        't850': get_T850,
+        't500': get_T500
+    }
     
-    # Load all monthly data
+    # Initialize data storage
+    monthly_data = {
+        var: {'spcam': [], 'model': []} for var in variables
+    }
+    
+
+    # Load all monthly data for each variable
     for i in range(1,13):
-        spcam_t2m = get_t2m(os.path.join(spcam_path, f"spcam.baseline.cam.h0.1998-{i:02d}.nc"))
-        model_t2m = get_t2m(os.path.join(model_path, f"conv_mem_share3.cam.h0.1998-{i:02d}.nc"))
-        monthly_spcam.append(spcam_t2m)
-        monthly_model.append(model_t2m)
+        spcam_file = os.path.join(spcam_path, f"spcam.baseline.cam.h0.{year}-{i:02d}.nc")
+        
+        # Try conv_mem_share3 first, fallback to conv_mem_spinup5 if not found
+        # Find first file matching cam.h0 pattern
+        model_files = [f for f in os.listdir(model_path) if 'cam.h0' in f]
+        if model_files:
+            model_prefix = model_files[0].split('.cam.h0')[0]
+            model_file = os.path.join(model_path, f"{model_prefix}.cam.h0.{year}-{i:02d}.nc")
+        else:
+            raise FileNotFoundError(f"No cam.h0 files found in {model_path}")
+        
+        for var, getter_func in variables.items():
+            monthly_data[var]['spcam'].append(getter_func(spcam_file))
+            monthly_data[var]['model'].append(getter_func(model_file))
     
-    # Convert to numpy arrays
-    monthly_spcam = np.array(monthly_spcam)
-    monthly_model = np.array(monthly_model)
+    # Convert lists to numpy arrays
+    for var in variables:
+        monthly_data[var]['spcam'] = np.array(monthly_data[var]['spcam'])
+        monthly_data[var]['model'] = np.array(monthly_data[var]['model'])
     
     # Get model name from path
-    model_name = os.path.basename(model_path).split('/')[-1].split('.')[0]
+    model_name = model_path.split('/')[-2]
     
-    # Calculate seasonal and annual means
-    annual_spcam = np.mean(monthly_spcam, axis=0)
-    annual_model = np.mean(monthly_model, axis=0)
-    annual_bias = annual_model - annual_spcam
-    np.save(f'{model_name}_annual_bias.npy', annual_bias)
+    # Define seasons
+    seasons = {
+        'annual': slice(None),
+        'djf': [11,0,1],
+        'mam': [2,3,4],
+        'jja': [5,6,7],
+        'son': [8,9,10]
+    }
     
-    djf_spcam = np.mean(monthly_spcam[[11,0,1],:,:], axis=0)  # Dec,Jan,Feb
-    djf_model = np.mean(monthly_model[[11,0,1],:,:], axis=0)
-    djf_bias = djf_model - djf_spcam
-    np.save(f'{model_name}_djf_bias.npy', djf_bias)
-    
-    mam_spcam = np.mean(monthly_spcam[2:5,:,:], axis=0)  # Mar,Apr,May
-    mam_model = np.mean(monthly_model[2:5,:,:], axis=0)
-    mam_bias = mam_model - mam_spcam
-    np.save(f'{model_name}_mam_bias.npy', mam_bias)
-    
-    jja_spcam = np.mean(monthly_spcam[5:8,:,:], axis=0)  # Jun,Jul,Aug
-    jja_model = np.mean(monthly_model[5:8,:,:], axis=0)
-    jja_bias = jja_model - jja_spcam
-    np.save(f'{model_name}_jja_bias.npy', jja_bias)
-    
-    son_spcam = np.mean(monthly_spcam[8:11,:,:], axis=0)  # Sep,Oct,Nov
-    son_model = np.mean(monthly_model[8:11,:,:], axis=0)
-    son_bias = son_model - son_spcam
-    np.save(f'{model_name}_son_bias.npy', son_bias)
-    
-    # Calculate metrics for each period
     metrics = {}
     
-    # Helper function for correlation
-    def spatial_correlation(x, y, weights):
-        x_w = x * weights
-        y_w = y * weights
-        x_mean = np.sum(x_w) / np.sum(weights)
-        y_mean = np.sum(y_w) / np.sum(weights)
-        cov = np.sum(weights * (x - x_mean) * (y - y_mean)) / np.sum(weights)
-        var_x = np.sum(weights * (x - x_mean)**2) / np.sum(weights)
-        var_y = np.sum(weights * (y - y_mean)**2) / np.sum(weights)
-        return cov / np.sqrt(var_x * var_y)
-    
-    weights = np.cos(np.deg2rad(lat))[:,np.newaxis]
-    
-    for period, (spcam, model) in {
-        'annual': (annual_spcam, annual_model),
-        'djf': (djf_spcam, djf_model),
-        'mam': (mam_spcam, mam_model),
-        'jja': (jja_spcam, jja_model),
-        'son': (son_spcam, son_model)
-    }.items():
-        metrics[period] = {
-            'rmse': area_RMSE(model, spcam, lat),
-            'correlation': spatial_correlation(spcam, model, weights)
-        }
+    # Calculate metrics for each variable and season
+    for var in variables:
+        metrics[var] = {}
         
+        for season, idx in seasons.items():
+            spcam_mean = np.mean(monthly_data[var]['spcam'][idx,:,:], axis=0)
+            model_mean = np.mean(monthly_data[var]['model'][idx,:,:], axis=0)
+            
+            # Calculate and save bias
+            bias = model_mean - spcam_mean
+            np.save(f'{model_name}_{var}_{season}_bias.npy', bias)
+            
+            # Calculate metrics
+            metrics[var][season] = {
+                'correlation': float(spatial_correlation(spcam_mean, model_mean, lat)),  # Convert to float for JSON serialization
+                'rmse': float(area_RMSE(model_mean, spcam_mean, lat))  # Convert to float for JSON serialization
+            }
+            
+            print(f"{var} {season}:")
+            print(f"  RMSE: {metrics[var][season]['rmse']:.4f}")
+            print(f"  Correlation: {metrics[var][season]['correlation']:.4f}")
+    
+    # Save metrics to JSON file
+    metrics_filename = f'{model_name}_metrics_{year}.json'
+    with open(metrics_filename, 'w') as f:
+        json.dump(metrics, f, indent=2)
+    print(f"\nMetrics saved to {metrics_filename}")
+    
     return metrics
 
 if __name__ == "__main__":
     import sys
     print(sys.argv[1])
     print(sys.argv[2])
-    metrics = compute_annual_rmse(sys.argv[1], sys.argv[2])
+    year = int(sys.argv[3]) if len(sys.argv) > 3 else 1998
+    metrics = compute_annual_rmse(sys.argv[1], sys.argv[2], year)
     print("\nMetrics Summary:")
     print("-" * 50)
-    for period in metrics:
-        print(f"\n{period.upper()}:")
-        print(f"  RMSE: {metrics[period]['rmse']:.4f}")
-        print(f"  Correlation: {metrics[period]['correlation']:.4f}")
+    for var in metrics:
+        print(f"\n{var.upper()}:")
+        for season in metrics[var]:
+            print(f"\n  {season.upper()}:")
+            print(f"    RMSE: {metrics[var][season]['rmse']:.4f}")
+            print(f"    Correlation: {metrics[var][season]['correlation']:.4f}")
     print("-" * 50)
