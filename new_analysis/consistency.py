@@ -16,8 +16,10 @@ for f in files:
         filenames.append(f)
 
 # Convert to pandas DataFrame
-metrics = {'variable': [], 'season': [], 'metric': [], 'value': [], 'simulation_type': []}
+metrics = {'variable': [], 'season': [], 'metric': [], 'value': [], 'simulation_type': [], 'simulation_name': []}
 for d, f in zip(data, filenames):
+    # Extract simulation name from filename
+    sim_name = f.split('_metrics_')[0].split('/')[-1]
     for var in d.keys():
         for season in d[var].keys():
             for metric, value in d[var][season].items():
@@ -25,6 +27,7 @@ for d, f in zip(data, filenames):
                 metrics['season'].append(season)
                 metrics['metric'].append(metric)
                 metrics['value'].append(value)
+                metrics['simulation_name'].append(sim_name)
                 if 'nncam_rerun' in f:
                     metrics['simulation_type'].append('nncam_rerun')
                 else:
@@ -44,8 +47,21 @@ variable_order = [
 df['variable'] = pd.Categorical(df['variable'], categories=variable_order, ordered=True)
 # Calculate summary statistics
 summary = df[df['simulation_type'] == 'our_simulations'].groupby(['variable', 'season', 'metric']).agg({
-    'value': ['mean', 'std', 'min', 'max']
+    'value': ['mean', 'std', 'min', 'max'],
+    'simulation_name': ['first', 'last']  # This will store names corresponding to min/max values
 }).round(4)
+
+# Add min/max simulation names
+min_max_names = df[df['simulation_type'] == 'our_simulations'].groupby(['variable', 'season', 'metric']).apply(
+    lambda x: pd.Series({
+        'min_sim': x.loc[x['value'].idxmin(), 'simulation_name'],
+        'max_sim': x.loc[x['value'].idxmax(), 'simulation_name']
+    })
+).unstack()
+
+# Combine with summary
+summary = pd.concat([summary, min_max_names], axis=1)
+
 # Calculate coefficient of variation (CV)
 summary['value', 'cv'] = summary['value', 'std'] / summary['value', 'mean']
 
