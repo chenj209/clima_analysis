@@ -76,8 +76,9 @@ variable_groups = {
 
 # Modified plotting code
 for metric in ['correlation', 'rmse']:
-    fig, axes = plt.subplots(len(variable_groups), 1, 
-                            figsize=(15, 5*len(variable_groups)),
+    # Change subplot arrangement to 1 row, multiple columns
+    fig, axes = plt.subplots(1, len(variable_groups), 
+                            figsize=(6*len(variable_groups), 5),
                             squeeze=False)
     axes = axes.flatten()
     
