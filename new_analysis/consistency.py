@@ -45,22 +45,24 @@ variable_order = [
 
 # Convert variable column to Categorical with custom ordering
 df['variable'] = pd.Categorical(df['variable'], categories=variable_order, ordered=True)
-# Calculate summary statistics
+# Modified summary statistics calculation
 summary = df[df['simulation_type'] == 'our_simulations'].groupby(['variable', 'season', 'metric']).agg({
-    'value': ['mean', 'std', 'min', 'max'],
-    'simulation_name': ['first', 'last']  # This will store names corresponding to min/max values
+    'value': ['mean', 'std', 'min', 'max']
 }).round(4)
 
-# Add min/max simulation names
-min_max_names = df[df['simulation_type'] == 'our_simulations'].groupby(['variable', 'season', 'metric']).apply(
-    lambda x: pd.Series({
-        'min_sim': x.loc[x['value'].idxmin(), 'simulation_name'],
-        'max_sim': x.loc[x['value'].idxmax(), 'simulation_name']
+# Create min/max names separately
+def get_min_max_sims(group):
+    min_idx = group['value'].idxmin()
+    max_idx = group['value'].idxmax()
+    return pd.Series({
+        ('simulation_name', 'min_sim'): group.loc[min_idx, 'simulation_name'],
+        ('simulation_name', 'max_sim'): group.loc[max_idx, 'simulation_name']
     })
-).unstack()
+
+min_max_df = df[df['simulation_type'] == 'our_simulations'].groupby(['variable', 'season', 'metric']).apply(get_min_max_sims)
 
 # Combine with summary
-summary = pd.concat([summary, min_max_names], axis=1)
+summary = pd.concat([summary, min_max_df], axis=1)
 
 # Calculate coefficient of variation (CV)
 summary['value', 'cv'] = summary['value', 'std'] / summary['value', 'mean']
