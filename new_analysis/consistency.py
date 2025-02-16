@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy import stats
 
 # Read all JSON files
 files = glob.glob('results/*_metrics_*.json')
@@ -60,30 +61,67 @@ def get_min_max_sims(group):
     })
 
 min_max_df = df[df['simulation_type'] == 'our_simulations'].groupby(['variable', 'season', 'metric']).apply(get_min_max_sims)
+nncam_df = df[df['simulation_type'] == 'nncam_rerun']
+print(nncam_df)
 
 # Combine with summary
-summary = pd.concat([summary, min_max_df], axis=1)
+# summary = pd.concat([summary, min_max_df], axis=1)
 
 # Calculate coefficient of variation (CV)
 summary['value', 'cv'] = summary['value', 'std'] / summary['value', 'mean']
 
-# Define variable groups
+# Perform ANOVA and add to summary
+def perform_anova(group):
+    season_groups = [group[group['season'] == season]['value'] for season in group['season'].unique()]
+    f_stat, p_val = stats.f_oneway(*season_groups)
+    return pd.Series({'f_stat': f_stat, 'p_val': p_val})
+
+# Calculate ANOVA for each variable/metric combination
+anova_results = df[df['simulation_type'] == 'our_simulations'].groupby(['variable', 'metric']).apply(perform_anova)
+
+# Create a dictionary to store the p-values for easy lookup
+anova_dict = {}
+for (var, metric), row in anova_results.iterrows():
+    anova_dict[(var, metric)] = row['p_val']
+
+# Add ANOVA results to summary as a new column
+summary[('value', 'anova_p')] = [anova_dict[(var, met)] for var, season, met in summary.index]
+
+# Round most columns to 4 decimal places, but use scientific notation with 8 digits for p-values
+summary = summary.round({('value', 'mean'): 4, 
+                        ('value', 'std'): 4, 
+                        ('value', 'min'): 4, 
+                        ('value', 'max'): 4,
+                        ('value', 'cv'): 4})
+summary[('value', 'anova_p')] = summary[('value', 'anova_p')].apply(lambda x: f"{x:.8e}")
+
+# Define variable groups with units
 variable_groups = {
-    'Temperature': ['t850', 't500', 't2m'],
-    'Humidity': ['q850', 'q500'],
-    'Precipitation': ['precip']
+    'Temperature': {
+        'vars': ['t850', 't500', 't2m'],
+        'units': {'correlation': '', 'rmse': 'K'}
+    },
+    'Humidity': {
+        'vars': ['q850', 'q500'],
+        'units': {'correlation': '', 'rmse': 'kg/kg'}
+    },
+    'Precipitation': {
+        'vars': ['precip'],
+        'units': {'correlation': '', 'rmse': 'mm/day'}
+    }
 }
 
 # Modified plotting code
 for metric in ['correlation', 'rmse']:
-    # Change subplot arrangement to 1 row, multiple columns
     fig, axes = plt.subplots(1, len(variable_groups), 
                             figsize=(6*len(variable_groups), 5),
                             squeeze=False)
     axes = axes.flatten()
     
-    for ax_idx, (group_name, group_vars) in enumerate(variable_groups.items()):
+    for ax_idx, (group_name, group_info) in enumerate(variable_groups.items()):
         ax = axes[ax_idx]
+        group_vars = group_info['vars']
+        unit = group_info['units'][metric]
         
         # Filter data for current group
         group_data = df[
@@ -92,7 +130,7 @@ for metric in ['correlation', 'rmse']:
         ]
         
         # Create box plot for group
-        sns_plot = sns.boxplot(data=group_data,
+        sns_plot = sns.boxplot(data=group_data[group_data['simulation_type'] == 'our_simulations'],
                               x='variable', y='value', hue='season',
                               order=group_vars,
                               ax=ax)
@@ -135,7 +173,11 @@ for metric in ['correlation', 'rmse']:
         # Customize subplot
         ax.set_title(f'{group_name} {metric}')
         ax.set_xlabel('')
-        ax.set_ylabel(metric.upper())
+        # Add unit to y-label if it exists
+        ylabel = metric.upper()
+        if unit:
+            ylabel += f' ({unit})'
+        ax.set_ylabel(ylabel)
         
         # Only keep one legend (on the first subplot)
         if ax_idx != 0:
