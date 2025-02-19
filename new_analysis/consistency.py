@@ -179,9 +179,20 @@ for metric in ['correlation', 'rmse']:
             ylabel += f' ({unit})'
         ax.set_ylabel(ylabel)
         
-        # Only keep one legend (on the first subplot)
+        # Only keep season legend on first subplot
         if ax_idx != 0:
             ax.get_legend().remove()
+        else:
+            season_legend = ax.legend(title='Season')
+            ax.add_artist(season_legend)
+            
+        # Add Wang2022 legend to every subplot
+        wang_line = ax.plot([], [], marker='*', markersize=10, color='gray', linestyle='None', label='Wang2022')[0]
+        if metric == 'rmse' and (group_name == 'Precipitation' or group_name == 'Temperature'):
+            wang_legend = ax.legend(handles=[wang_line], loc='lower right')
+        else:
+            wang_legend = ax.legend(handles=[wang_line], loc='upper right')
+        ax.add_artist(wang_legend)
     
     plt.tight_layout()
     plt.show()
