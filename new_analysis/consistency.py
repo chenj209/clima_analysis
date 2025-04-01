@@ -111,13 +111,16 @@ variable_groups = {
     }
 }
 
+plots_label = ['a', 'b', 'c', 'd', 'e', 'f']
 # Modified plotting code
 for metric in ['correlation', 'rmse']:
-    fig, axes = plt.subplots(1, len(variable_groups), 
+    # Create figure for seasonal plots
+    fig, axes = plt.subplots(1, len(variable_groups),
                             figsize=(6*len(variable_groups), 5),
                             squeeze=False)
     axes = axes.flatten()
     
+    # First plot the variable groups as before
     for ax_idx, (group_name, group_info) in enumerate(variable_groups.items()):
         ax = axes[ax_idx]
         group_vars = group_info['vars']
@@ -139,8 +142,7 @@ for metric in ['correlation', 'rmse']:
         season_colors = {text.get_text(): patch.get_facecolor() 
                         for text, patch in zip(ax.legend_.get_texts(), ax.legend_.get_patches())}
         
-        # # Remove outlier points
-
+        # Remove outlier points
         for line in ax.lines:
             if line.get_linestyle() == 'None':
                 line.remove()
@@ -171,7 +173,10 @@ for metric in ['correlation', 'rmse']:
                        zorder=10)
         
         # Customize subplot
-        ax.set_title(f'{group_name} {metric}')
+        if metric == 'correlation':
+            ax.set_title(f'({plots_label[ax_idx]}) {group_name} {metric}')
+        else:
+            ax.set_title(f'({plots_label[ax_idx+3]}) {group_name} {metric}')
         ax.set_xlabel('')
         # Add unit to y-label if it exists
         ylabel = metric.upper()
@@ -184,6 +189,12 @@ for metric in ['correlation', 'rmse']:
             ax.get_legend().remove()
         else:
             season_legend = ax.legend(title='Season')
+            # Get legend texts and capitalize them
+            for text in season_legend.get_texts():
+                if text.get_text() == 'annual':
+                    text.set_text('Annual')
+                else:
+                    text.set_text(text.get_text().upper())
             ax.add_artist(season_legend)
             
         # Add Wang2022 legend to every subplot
@@ -193,8 +204,91 @@ for metric in ['correlation', 'rmse']:
         else:
             wang_legend = ax.legend(handles=[wang_line], loc='upper right')
         ax.add_artist(wang_legend)
+
+    plt.tight_layout()
+    plt.show()
+
+    # Create figure with two subplots - one for humidity variables and one for others
+    humidity_vars = ['q500', 'q850']
+    other_vars = [v for v in variable_order if v not in humidity_vars]
+    
+    # plt.rcParams.update({'font.size': 14})  # Increase font size
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    annual_data = df[
+        (df['metric'] == metric) &
+        (df['season'] == 'annual')
+    ]
+    
+    # Plot for non-humidity variables
+    non_humidity_data = annual_data[annual_data['variable'].isin(other_vars)]
+    sns.boxplot(data=non_humidity_data[non_humidity_data['simulation_type'] == 'our_simulations'],
+                x='variable', y='value',
+                order=other_vars,
+                ax=ax1)
+    
+    # Add stars for nncam_rerun points
+    nncam_annual = non_humidity_data[non_humidity_data['simulation_type'] == 'nncam_rerun']
+    if not nncam_annual.empty:
+        for idx, row in nncam_annual.iterrows():
+            var_idx = other_vars.index(row['variable'])
+            ax1.plot(var_idx, row['value'],
+                    marker='*', markersize=10,
+                    color='gray',
+                    zorder=10)
+    
+    # Customize first subplot
+    ax1.set_title(f'Annual {metric} (Temperature & Precipitation)', fontsize=16)
+    ax1.set_xlabel('')
+    ylabel = metric.upper()
+    if unit:
+        if any(var in other_vars for var in ['t500', 't850', 't2m']):
+            ylabel += ' (K | mm/day)'
+        elif 'precip' in other_vars:
+            ylabel += ' (mm/day)'
+    ax1.set_ylabel(ylabel, fontsize=14)
+    # ax1.set_yscale('log')
+    ax1.tick_params(axis='both', labelsize=12)
+    
+    # Add Wang2022 legend to first subplot
+    wang_line = ax1.plot([], [], marker='*', markersize=10, color='gray', linestyle='None', label='Wang2022')[0]
+    wang_legend = ax1.legend(handles=[wang_line], loc='lower right', fontsize=12)
+    ax1.add_artist(wang_legend)
+    
+    # Plot for humidity variables
+    humidity_data = annual_data[annual_data['variable'].isin(humidity_vars)]
+    sns.boxplot(data=humidity_data[humidity_data['simulation_type'] == 'our_simulations'],
+                x='variable', y='value',
+                order=humidity_vars,
+                ax=ax2)
+    
+    # Add stars for nncam_rerun points
+    nncam_humidity = humidity_data[humidity_data['simulation_type'] == 'nncam_rerun']
+    if not nncam_humidity.empty:
+        for idx, row in nncam_humidity.iterrows():
+            var_idx = humidity_vars.index(row['variable'])
+            ax2.plot(var_idx, row['value'],
+                    marker='*', markersize=10,
+                    color='gray',
+                    zorder=10)
+    
+    # Customize second subplot
+    ax2.set_title(f'Annual {metric} (Humidity)', fontsize=16)
+    ax2.set_xlabel('')
+    ylabel = metric.upper()
+    if unit:
+        ylabel += ' (g/kg)'
+    ax2.set_ylabel(ylabel, fontsize=14)
+    # ax2.set_yscale('log')
+    ax2.tick_params(axis='both', labelsize=12)
+    
+    # Add Wang2022 legend to second subplot
+    wang_line = ax2.plot([], [], marker='*', markersize=10, color='gray', linestyle='None', label='Wang2022')[0]
+    wang_legend = ax2.legend(handles=[wang_line], loc='lower right', fontsize=12)
+    ax2.add_artist(wang_legend)
     
     plt.tight_layout()
+    plt.savefig(f'annual_{metric}_comparison.pdf', bbox_inches='tight', dpi=300)
     plt.show()
 
 print(summary)
