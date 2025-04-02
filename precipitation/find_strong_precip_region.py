@@ -18,11 +18,19 @@ def parse_args():
                       help='Precipitation threshold in mm/day (default: 200)')
     parser.add_argument('--consecutive-hours', type=int, default=3,
                       help='Number of consecutive hours required above threshold (default: 3)')
-    return parser.parse_args()
+    parser.add_argument('--nc_dir_paths', type=str, nargs='+', required=False,
+                      help='Paths to the directories containing the h1.nc files')
+    parser.add_argument('--csv_paths', type=str, nargs='+', required=False,
+                      help='Paths to CSV files containing precipitation data')
+    args = parser.parse_args()
+    
+    if not args.nc_dir_paths and not args.csv_paths:
+        parser.error("At least one of --nc_dir_paths or --csv_paths must be provided")
+    
+    return args
 
-def load_precipitation_data():
+def load_precipitation_data(nc_dir_path):
     """Load precipitation data from all files."""
-    nc_dir_path = "/Users/jianda/Projects/experience_replay_data/nncam/"
     files = os.listdir(nc_dir_path)
     
     all_data = []
@@ -48,8 +56,10 @@ def load_precipitation_data():
                 n_grid = precip.shape[1] * precip.shape[2]
                 precip_reshaped = precip.reshape(n_time, n_grid)
                 
-                # Store time and data together
-                time_data_pairs.extend([(t, d) for t, d in zip(time_values, precip_reshaped)])
+                # Store time and data together, filtering for 1998
+                for t, d in zip(time_values, precip_reshaped):
+                    if t.year == 1998:
+                        time_data_pairs.append((t, d))
                 
             except Exception as e:
                 print(f"Error loading {file}: {e}")
@@ -69,8 +79,40 @@ def load_precipitation_data():
     precip_data = np.stack(all_data, axis=0)
     print(f"\nFinal data shape: {precip_data.shape}")
     print(f"Total number of time steps: {len(all_times)}")
+    print(f"Date range: {all_times[0]} to {all_times[-1]}")
     
     return precip_data, all_times
+
+def load_csv_precipitation_data(csv_path):
+    """Load precipitation data from a CSV file.
+    
+    Args:
+        csv_path: Path to the CSV file containing precipitation data
+        
+    Returns:
+        tuple: (precipitation_data, time_values)
+    """
+    print(f"\nLoading CSV file: {csv_path}")
+    
+    # Read the CSV file
+    df = pd.read_csv(csv_path)
+    
+    # Convert the first column to datetime index
+    df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])
+    df.set_index(df.columns[0], inplace=True)
+    
+    # Sort by time index
+    df = df.sort_index()
+    
+    # Convert to numpy array for consistency with netCDF data
+    precip_data = df.values
+    time_values = df.index.to_list()
+    
+    print(f"Shape of precipitation data: {precip_data.shape}")
+    print(f"Time range: {time_values[0]} to {time_values[-1]}")
+    print(f"Number of time steps: {len(time_values)}")
+    
+    return precip_data, time_values
 
 def load_precip_data(nc_dir_path, exclude_pattern=None, include_pattern=None):
     """
@@ -242,7 +284,66 @@ def analyze_time_windows(strong_precip_mask, time_values, grid_idx, window_size=
     
     return monthly_counts, consecutive_events
 
-def plot_strong_precip_regions(frequencies, lat, lon, monthly_counts, threshold, all_time_indices=None, all_grid_indices=None, time_values=None, precip_data=None, max_freq_grid_idx=None, lat_idx=None, lon_idx=None):
+def process_single_simulation(data_path, threshold, consecutive_hours, is_csv=False):
+    """Process a single simulation directory or CSV file and return results."""
+    # Load precipitation data
+    if is_csv:
+        precip_array, time_values = load_csv_precipitation_data(data_path)
+        # For CSV files, we assume the data is already in the correct shape (time, grid_points)
+        # and the grid is 96x144 (standard CAM grid)
+        lat = np.linspace(-90, 90, 96)  # Approximate latitudes
+        lon = np.linspace(0, 360, 144)  # Approximate longitudes
+    else:
+        precip_array, time_values = load_precipitation_data(data_path)
+        # Get lat/lon information from one of the files
+        first_file = next(f for f in os.listdir(data_path) if "h1" in f and f.endswith(".nc"))
+        ds = nc.Dataset(os.path.join(data_path, first_file))
+        lat = ds.variables['lat'][:]
+        lon = ds.variables['lon'][:]
+        ds.close()
+    
+    # Find strong precipitation regions
+    result = find_strong_precip_regions(
+        precip_array, 
+        threshold=threshold,
+        consecutive_hours=consecutive_hours,
+        time_values=time_values
+    )
+    
+    # Get the region with highest frequency
+    max_lat = lat[result['lat_idx']]
+    max_lon = lon[result['lon_idx']]
+    max_freq_grid_idx = result['lat_idx'] * 144 + result['lon_idx']
+    
+    return {
+        'result': result,
+        'lat': lat,
+        'lon': lon,
+        'precip_array': precip_array,
+        'time_values': time_values,
+        'max_freq_grid_idx': max_freq_grid_idx,
+        'max_lat': max_lat,
+        'max_lon': max_lon
+    }
+
+def get_global_limits(all_simulations):
+    """Calculate global limits for consistent visualization."""
+    max_freq = 0
+    max_monthly_count = 0
+    max_precip = 0
+    
+    for sim in all_simulations:
+        max_freq = max(max_freq, np.max(sim['result']['frequencies']))
+        max_monthly_count = max(max_monthly_count, np.max(sim['result']['monthly_counts']))
+        max_precip = max(max_precip, np.max(sim['precip_array']))
+    
+    return {
+        'max_freq': max_freq,
+        'max_monthly_count': max_monthly_count,
+        'max_precip': max_precip
+    }
+
+def plot_strong_precip_regions(simulation_data, threshold, global_limits, output_path):
     """Plot the frequency of strong precipitation events and monthly distribution."""
     plt.figure(figsize=(15, 15))
     
@@ -252,12 +353,13 @@ def plot_strong_precip_regions(frequencies, lat, lon, monthly_counts, threshold,
     ax1.add_feature(cfeature.BORDERS, linestyle=':')
     
     # Create a mesh grid for plotting
-    lon_mesh, lat_mesh = np.meshgrid(lon, lat)
+    lon_mesh, lat_mesh = np.meshgrid(simulation_data['lon'], simulation_data['lat'])
     
-    # Plot the frequency data
-    c = ax1.contourf(lon_mesh, lat_mesh, frequencies,
+    # Plot the frequency data with consistent scale
+    c = ax1.contourf(lon_mesh, lat_mesh, simulation_data['result']['frequencies'],
                      transform=ccrs.PlateCarree(),
-                     cmap='YlOrRd')
+                     cmap='YlOrRd',
+                     levels=np.linspace(0, global_limits['max_freq'], 20))
     plt.colorbar(c, ax=ax1, label='Frequency (%)')
     
     # Set title
@@ -272,8 +374,8 @@ def plot_strong_precip_regions(frequencies, lat, lon, monthly_counts, threshold,
     # Add box around most frequent location
     box_width = 5  # degrees
     box_height = 5  # degrees
-    lon_center = lon[lon_idx]
-    lat_center = lat[lat_idx]
+    lon_center = simulation_data['max_lon']
+    lat_center = simulation_data['max_lat']
     box = plt.Rectangle((lon_center - box_width/2, lat_center - box_height/2), 
                        box_width, box_height,
                        fill=False, color='red', linewidth=2, 
@@ -283,18 +385,19 @@ def plot_strong_precip_regions(frequencies, lat, lon, monthly_counts, threshold,
     # Plot monthly distribution for all events
     ax2 = plt.subplot(222)
     months = range(1, 13)
-    ax2.bar(months, monthly_counts)
+    ax2.bar(months, simulation_data['result']['monthly_counts'])
     ax2.set_xlabel('Month')
     ax2.set_ylabel('Number of Events')
     ax2.set_title('Monthly Distribution of All Strong Precipitation Events')
     ax2.set_xticks(months)
+    ax2.set_ylim(0, global_limits['max_monthly_count'] * 1.1)
     ax2.grid(True, alpha=0.3)
     
     # Plot time series of all events
-    if all_time_indices is not None and all_grid_indices is not None:
+    if simulation_data['result']['all_time_indices'] is not None:
         ax3 = plt.subplot(223)
         # Convert time indices to actual dates
-        event_dates = [time_values[i] for i in all_time_indices]
+        event_dates = [simulation_data['time_values'][i] for i in simulation_data['result']['all_time_indices']]
         event_dates = [pd.to_datetime(str(t)) for t in event_dates]
         
         # Count overlapping points at the same time
@@ -304,14 +407,21 @@ def plot_strong_precip_regions(frequencies, lat, lon, monthly_counts, threshold,
         
         # Plot points with size based on count
         max_count = max(time_counts.values())
-        for date, grid_idx in zip(event_dates, all_grid_indices):
+        for date, grid_idx in zip(event_dates, simulation_data['result']['all_grid_indices']):
             count = time_counts[date]
             size = 10 + (count / max_count) * 90  # Scale size from 10 to 100
             ax3.scatter(date, grid_idx, s=size, color='blue', alpha=0.6)
         
+        # Add red dot for most frequent region at actual event times
+        most_freq_events = simulation_data['result']['event_times']
+        if most_freq_events:
+            most_freq_dates = [pd.to_datetime(str(t)) for t in most_freq_events]
+            ax3.scatter(most_freq_dates, [simulation_data['max_freq_grid_idx']] * len(most_freq_dates), 
+                       color='red', s=100, label='Most frequent region')
+        
         ax3.set_xlabel('Time')
         ax3.set_ylabel('Grid Point')
-        ax3.set_title(f'All Strong Precipitation Events (Total: {len(all_time_indices)})')
+        ax3.set_title(f'All Strong Precipitation Events (Total: {len(simulation_data["result"]["all_time_indices"])})')
         ax3.grid(True, alpha=0.3)
         
         # Format x-axis to show months nicely
@@ -323,24 +433,32 @@ def plot_strong_precip_regions(frequencies, lat, lon, monthly_counts, threshold,
         ax3.set_ylim(0, 13824)  # Total number of grid points (96 * 144)
     
     # Plot time evolution at most frequent location
-    if time_values is not None and precip_data is not None and max_freq_grid_idx is not None:
+    if simulation_data['time_values'] is not None:
         ax4 = plt.subplot(224)
-        location_precip = precip_data[:, max_freq_grid_idx]
+        location_precip = simulation_data['precip_array'][:, simulation_data['max_freq_grid_idx']]
         
         # Convert cftime to matplotlib datetime and ensure they're sorted
-        time_values_mpl = [pd.to_datetime(str(t)) for t in time_values]
+        time_values_mpl = [pd.to_datetime(str(t)) for t in simulation_data['time_values']]
         
         # Format x-axis to show months
         ax4.plot(time_values_mpl, location_precip, 'b-', alpha=0.5, label='Precipitation')
         # Highlight strong precipitation events
         strong_events = location_precip > threshold
-        ax4.scatter(np.array(time_values_mpl)[strong_events], 
+        strong_event_times = np.array(time_values_mpl)[strong_events]
+        
+        if len(strong_event_times) > 0:
+            event_date_range = f"\nEvents from {strong_event_times[0].strftime('%Y-%m-%d')} to {strong_event_times[-1].strftime('%Y-%m-%d')}"
+        else:
+            event_date_range = "\nNo strong precipitation events"
+            
+        ax4.scatter(strong_event_times, 
                    location_precip[strong_events], 
                    color='red', s=20, label=f'Events > {threshold} mm/day')
         ax4.axhline(y=threshold, color='r', linestyle='--', alpha=0.5, label='Threshold')
         ax4.set_xlabel('Time')
         ax4.set_ylabel('Precipitation (mm/day)')
-        ax4.set_title(f'Time Evolution at ({lon[lon_idx]:.2f}°E, {lat[lat_idx]:.2f}°N) [Grid idx: {max_freq_grid_idx}]')
+        ax4.set_title(f'Time Evolution at ({simulation_data["max_lon"]:.2f}°E, {simulation_data["max_lat"]:.2f}°N) [Grid idx: {simulation_data["max_freq_grid_idx"]}]{event_date_range}')
+        ax4.set_ylim(0, global_limits['max_precip'] * 1.1)
         ax4.grid(True, alpha=0.3)
         ax4.legend()
         
@@ -350,73 +468,67 @@ def plot_strong_precip_regions(frequencies, lat, lon, monthly_counts, threshold,
         plt.xticks(rotation=45)
     
     plt.tight_layout()
-    plt.savefig(f'strong_precip_regions_{int(threshold)}mm.png')
+    plt.savefig(output_path)
     plt.close()
 
 def main():
     """Main function to run the analysis."""
     args = parse_args()
     
-    # Load precipitation data
-    precip_array, time_values = load_precipitation_data()
+    # Process each simulation
+    all_simulations = []
     
-    # Get lat/lon information from one of the files
-    nc_dir_path = "/Users/jianda/Projects/experience_replay_data/nncam/"
-    first_file = next(f for f in os.listdir(nc_dir_path) if "h1" in f and f.endswith(".nc"))
-    ds = nc.Dataset(os.path.join(nc_dir_path, first_file))
-    lat = ds.variables['lat'][:]
-    lon = ds.variables['lon'][:]
-    ds.close()
+    # Process netCDF directories if provided
+    if args.nc_dir_paths:
+        for nc_dir_path in args.nc_dir_paths:
+            print(f"\nProcessing simulation in directory: {nc_dir_path}")
+            sim_data = process_single_simulation(nc_dir_path, args.threshold, args.consecutive_hours, is_csv=False)
+            all_simulations.append(sim_data)
     
-    # Find strong precipitation regions
-    result = find_strong_precip_regions(
-        precip_array, 
-        threshold=args.threshold,
-        consecutive_hours=args.consecutive_hours,
-        time_values=time_values
-    )
+    # Process CSV files if provided
+    if args.csv_paths:
+        for csv_path in args.csv_paths:
+            print(f"\nProcessing simulation from CSV: {csv_path}")
+            sim_data = process_single_simulation(csv_path, args.threshold, args.consecutive_hours, is_csv=True)
+            all_simulations.append(sim_data)
     
-    # Get the region with highest frequency
-    max_lat = lat[result['lat_idx']]
-    max_lon = lon[result['lon_idx']]
-    max_freq_grid_idx = result['lat_idx'] * 144 + result['lon_idx']
+    # Calculate global limits for consistent visualization
+    global_limits = get_global_limits(all_simulations)
     
-    # Plot results with threshold
-    plot_strong_precip_regions(
-        result['frequencies'],
-        lat, 
-        lon, 
-        result['monthly_counts'], 
-        args.threshold,
-        result['all_time_indices'],
-        result['all_grid_indices'],
-        time_values,
-        precip_array,
-        max_freq_grid_idx,
-        result['lat_idx'],
-        result['lon_idx']
-    )
-    
-    print(f"\nStrong Precipitation Analysis Results:")
-    print(f"Threshold: {args.threshold} mm/day")
-    print(f"Most frequent region: {max_lat:.2f}°N, {max_lon:.2f}°E")
-    print(f"Frequency: {result['frequency']:.2f}% of time")
-    print(f"Average precipitation in this region: {result['avg_precip']:.2f} mm/day")
-    
-    print("\nMonthly distribution of all strong precipitation events:")
-    for month, count in enumerate(result['monthly_counts'], 1):
-        print(f"{calendar.month_name[month]}: {int(count)} events")
-    
-    if result['extended_windows']:
-        print(f"\nFound {len(result['extended_windows'])} extended time windows of strong precipitation")
-        for window in result['extended_windows']:
-            start_time = time_values[window[0]]
-            end_time = time_values[window[-1]]
-            print(f"Window: {start_time} to {end_time}")
-    else:
-        print("\nNo extended time windows of strong precipitation found")
-    
-    print(f"\nOutput saved as: strong_precip_regions_{int(args.threshold)}mm.png")
+    # Generate plots for each simulation
+    for i, sim_data in enumerate(all_simulations):
+        # Extract simulation name from path
+        if args.nc_dir_paths and i < len(args.nc_dir_paths):
+            sim_name = os.path.basename(os.path.dirname(args.nc_dir_paths[i]))
+        else:
+            csv_idx = i - len(args.nc_dir_paths) if args.nc_dir_paths else i
+            sim_name = os.path.splitext(os.path.basename(args.csv_paths[csv_idx]))[0]
+            
+        output_path = f'strong_precip_regions_{sim_name}_{int(args.threshold)}mm.png'
+        
+        print(f"\nGenerating plot for {sim_name}")
+        plot_strong_precip_regions(sim_data, args.threshold, global_limits, output_path)
+        
+        print(f"\nStrong Precipitation Analysis Results for {sim_name}:")
+        print(f"Threshold: {args.threshold} mm/day")
+        print(f"Most frequent region: {sim_data['max_lat']:.2f}°N, {sim_data['max_lon']:.2f}°E")
+        print(f"Frequency: {sim_data['result']['frequency']:.2f}% of time")
+        print(f"Average precipitation in this region: {sim_data['result']['avg_precip']:.2f} mm/day")
+        
+        print("\nMonthly distribution of all strong precipitation events:")
+        for month, count in enumerate(sim_data['result']['monthly_counts'], 1):
+            print(f"{calendar.month_name[month]}: {int(count)} events")
+        
+        if sim_data['result']['extended_windows']:
+            print(f"\nFound {len(sim_data['result']['extended_windows'])} extended time windows of strong precipitation")
+            for window in sim_data['result']['extended_windows']:
+                start_time = sim_data['time_values'][window[0]]
+                end_time = sim_data['time_values'][window[-1]]
+                print(f"Window: {start_time} to {end_time}")
+        else:
+            print("\nNo extended time windows of strong precipitation found")
+        
+        print(f"\nOutput saved as: {output_path}")
 
 if __name__ == "__main__":
     main() 
