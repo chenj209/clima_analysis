@@ -22,14 +22,24 @@ def parse_args():
                       help='Paths to the directories containing the h1.nc files')
     parser.add_argument('--csv_paths', type=str, nargs='+', required=False,
                       help='Paths to CSV files containing precipitation data')
+    parser.add_argument('--start-date', type=str, default=None,
+                      help='Start date for analysis in YYYY-MM-DD format (default: None)')
+    parser.add_argument('--end-date', type=str, default=None,
+                      help='End date for analysis in YYYY-MM-DD format (default: None)')
     args = parser.parse_args()
     
     if not args.nc_dir_paths and not args.csv_paths:
         parser.error("At least one of --nc_dir_paths or --csv_paths must be provided")
     
+    # Convert date strings to datetime objects if provided
+    if args.start_date:
+        args.start_date = datetime.strptime(args.start_date, '%Y-%m-%d')
+    if args.end_date:
+        args.end_date = datetime.strptime(args.end_date, '%Y-%m-%d')
+    
     return args
 
-def load_precipitation_data(nc_dir_path):
+def load_precipitation_data(nc_dir_path, start_date=None, end_date=None):
     """Load precipitation data from all files."""
     files = os.listdir(nc_dir_path)
     
@@ -56,10 +66,13 @@ def load_precipitation_data(nc_dir_path):
                 n_grid = precip.shape[1] * precip.shape[2]
                 precip_reshaped = precip.reshape(n_time, n_grid)
                 
-                # Store time and data together, filtering for 1998
+                # Store time and data together, filtering for date range
                 for t, d in zip(time_values, precip_reshaped):
-                    if t.year == 1998:
-                        time_data_pairs.append((t, d))
+                    if start_date and t < start_date:
+                        continue
+                    if end_date and t > end_date:
+                        continue
+                    time_data_pairs.append((t, d))
                 
             except Exception as e:
                 print(f"Error loading {file}: {e}")
@@ -83,11 +96,13 @@ def load_precipitation_data(nc_dir_path):
     
     return precip_data, all_times
 
-def load_csv_precipitation_data(csv_path):
+def load_csv_precipitation_data(csv_path, start_date=None, end_date=None):
     """Load precipitation data from a CSV file.
     
     Args:
         csv_path: Path to the CSV file containing precipitation data
+        start_date: Optional start date for filtering
+        end_date: Optional end date for filtering
         
     Returns:
         tuple: (precipitation_data, time_values)
@@ -100,6 +115,12 @@ def load_csv_precipitation_data(csv_path):
     # Convert the first column to datetime index
     df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])
     df.set_index(df.columns[0], inplace=True)
+    
+    # Filter by date range if specified
+    if start_date:
+        df = df[df.index >= start_date]
+    if end_date:
+        df = df[df.index <= end_date]
     
     # Sort by time index
     df = df.sort_index()
@@ -284,17 +305,17 @@ def analyze_time_windows(strong_precip_mask, time_values, grid_idx, window_size=
     
     return monthly_counts, consecutive_events
 
-def process_single_simulation(data_path, threshold, consecutive_hours, is_csv=False):
+def process_single_simulation(data_path, threshold, consecutive_hours, start_date=None, end_date=None, is_csv=False):
     """Process a single simulation directory or CSV file and return results."""
     # Load precipitation data
     if is_csv:
-        precip_array, time_values = load_csv_precipitation_data(data_path)
+        precip_array, time_values = load_csv_precipitation_data(data_path, start_date, end_date)
         # For CSV files, we assume the data is already in the correct shape (time, grid_points)
         # and the grid is 96x144 (standard CAM grid)
         lat = np.linspace(-90, 90, 96)  # Approximate latitudes
         lon = np.linspace(0, 360, 144)  # Approximate longitudes
     else:
-        precip_array, time_values = load_precipitation_data(data_path)
+        precip_array, time_values = load_precipitation_data(data_path, start_date, end_date)
         # Get lat/lon information from one of the files
         first_file = next(f for f in os.listdir(data_path) if "h1" in f and f.endswith(".nc"))
         ds = nc.Dataset(os.path.join(data_path, first_file))
@@ -419,14 +440,18 @@ def plot_strong_precip_regions(simulation_data, threshold, global_limits, output
             ax3.scatter(most_freq_dates, [simulation_data['max_freq_grid_idx']] * len(most_freq_dates), 
                        color='red', s=100, label='Most frequent region')
         
+        # Set x-axis limits to full time range
+        all_dates = [pd.to_datetime(str(t)) for t in simulation_data['time_values']]
+        ax3.set_xlim(min(all_dates), max(all_dates))
+        
         ax3.set_xlabel('Time')
         ax3.set_ylabel('Grid Point')
         ax3.set_title(f'All Strong Precipitation Events (Total: {len(simulation_data["result"]["all_time_indices"])})')
         ax3.grid(True, alpha=0.3)
         
-        # Format x-axis to show months nicely
-        ax3.xaxis.set_major_locator(mdates.MonthLocator())
-        ax3.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        # Format x-axis to show days
+        ax3.xaxis.set_major_locator(mdates.DayLocator(interval=1))  # Show a tick every day
+        ax3.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
         plt.xticks(rotation=45)
         
         # Set y-axis limits to show all grid points
@@ -462,9 +487,9 @@ def plot_strong_precip_regions(simulation_data, threshold, global_limits, output
         ax4.grid(True, alpha=0.3)
         ax4.legend()
         
-        # Format x-axis to show months nicely
-        ax4.xaxis.set_major_locator(mdates.MonthLocator())
-        ax4.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        # Format x-axis to show days
+        ax4.xaxis.set_major_locator(mdates.DayLocator(interval=1))  # Show a tick every day
+        ax4.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
         plt.xticks(rotation=45)
     
     plt.tight_layout()
@@ -482,14 +507,16 @@ def main():
     if args.nc_dir_paths:
         for nc_dir_path in args.nc_dir_paths:
             print(f"\nProcessing simulation in directory: {nc_dir_path}")
-            sim_data = process_single_simulation(nc_dir_path, args.threshold, args.consecutive_hours, is_csv=False)
+            sim_data = process_single_simulation(nc_dir_path, args.threshold, args.consecutive_hours, 
+                                               start_date=args.start_date, end_date=args.end_date, is_csv=False)
             all_simulations.append(sim_data)
     
     # Process CSV files if provided
     if args.csv_paths:
         for csv_path in args.csv_paths:
             print(f"\nProcessing simulation from CSV: {csv_path}")
-            sim_data = process_single_simulation(csv_path, args.threshold, args.consecutive_hours, is_csv=True)
+            sim_data = process_single_simulation(csv_path, args.threshold, args.consecutive_hours,
+                                               start_date=args.start_date, end_date=args.end_date, is_csv=True)
             all_simulations.append(sim_data)
     
     # Calculate global limits for consistent visualization
@@ -504,13 +531,21 @@ def main():
             csv_idx = i - len(args.nc_dir_paths) if args.nc_dir_paths else i
             sim_name = os.path.splitext(os.path.basename(args.csv_paths[csv_idx]))[0]
             
-        output_path = f'strong_precip_regions_{sim_name}_{int(args.threshold)}mm.png'
+        # Create date range string for output filename
+        date_range_str = ""
+        if args.start_date:
+            date_range_str += f"_{args.start_date.strftime('%Y%m%d')}"
+        if args.end_date:
+            date_range_str += f"_{args.end_date.strftime('%Y%m%d')}"
+            
+        output_path = f'strong_precip_regions_{sim_name}_{int(args.threshold)}mm{date_range_str}.png'
         
         print(f"\nGenerating plot for {sim_name}")
         plot_strong_precip_regions(sim_data, args.threshold, global_limits, output_path)
         
         print(f"\nStrong Precipitation Analysis Results for {sim_name}:")
         print(f"Threshold: {args.threshold} mm/day")
+        print(f"Date range: {args.start_date} to {args.end_date}" if args.start_date or args.end_date else "Full date range")
         print(f"Most frequent region: {sim_data['max_lat']:.2f}°N, {sim_data['max_lon']:.2f}°E")
         print(f"Frequency: {sim_data['result']['frequency']:.2f}% of time")
         print(f"Average precipitation in this region: {sim_data['result']['avg_precip']:.2f} mm/day")
@@ -531,4 +566,4 @@ def main():
         print(f"\nOutput saved as: {output_path}")
 
 if __name__ == "__main__":
-    main() 
+    main()
