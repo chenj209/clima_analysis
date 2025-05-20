@@ -26,6 +26,8 @@ def parse_args():
                       help='Start date for analysis in YYYY-MM-DD format (default: None)')
     parser.add_argument('--end-date', type=str, default=None,
                       help='End date for analysis in YYYY-MM-DD format (default: None)')
+    parser.add_argument('--use-first-location', action='store_true',
+                      help='Use the same location as the first simulation for all subsequent simulations')
     args = parser.parse_args()
     
     if not args.nc_dir_paths and not args.csv_paths:
@@ -364,7 +366,7 @@ def get_global_limits(all_simulations):
         'max_precip': max_precip
     }
 
-def plot_strong_precip_regions(simulation_data, threshold, global_limits, output_path):
+def plot_strong_precip_regions(simulation_data, threshold, global_limits, output_path, first_sim_data=None):
     """Plot the frequency of strong precipitation events and monthly distribution."""
     plt.figure(figsize=(15, 15))
     
@@ -450,8 +452,10 @@ def plot_strong_precip_regions(simulation_data, threshold, global_limits, output
         ax3.grid(True, alpha=0.3)
         
         # Format x-axis to show days
-        ax3.xaxis.set_major_locator(mdates.DayLocator(interval=1))  # Show a tick every day
-        ax3.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        # ax3.xaxis.set_major_locator(mdates.DayLocator(interval=1))  # Show a tick every day
+        # ax3.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax3.xaxis.set_major_locator(mdates.MonthLocator())  # Show a tick every month
+        ax3.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
         plt.xticks(rotation=45)
         
         # Set y-axis limits to show all grid points
@@ -460,7 +464,18 @@ def plot_strong_precip_regions(simulation_data, threshold, global_limits, output
     # Plot time evolution at most frequent location
     if simulation_data['time_values'] is not None:
         ax4 = plt.subplot(224)
-        location_precip = simulation_data['precip_array'][:, simulation_data['max_freq_grid_idx']]
+        
+        # Use first simulation's location if specified
+        if first_sim_data is not None:
+            location_precip = simulation_data['precip_array'][:, first_sim_data['max_freq_grid_idx']]
+            lat_center = first_sim_data['max_lat']
+            lon_center = first_sim_data['max_lon']
+            grid_idx = first_sim_data['max_freq_grid_idx']
+        else:
+            location_precip = simulation_data['precip_array'][:, simulation_data['max_freq_grid_idx']]
+            lat_center = simulation_data['max_lat']
+            lon_center = simulation_data['max_lon']
+            grid_idx = simulation_data['max_freq_grid_idx']
         
         # Convert cftime to matplotlib datetime and ensure they're sorted
         time_values_mpl = [pd.to_datetime(str(t)) for t in simulation_data['time_values']]
@@ -482,14 +497,16 @@ def plot_strong_precip_regions(simulation_data, threshold, global_limits, output
         ax4.axhline(y=threshold, color='r', linestyle='--', alpha=0.5, label='Threshold')
         ax4.set_xlabel('Time')
         ax4.set_ylabel('Precipitation (mm/day)')
-        ax4.set_title(f'Time Evolution at ({simulation_data["max_lon"]:.2f}°E, {simulation_data["max_lat"]:.2f}°N) [Grid idx: {simulation_data["max_freq_grid_idx"]}]{event_date_range}')
+        ax4.set_title(f'Time Evolution at ({lon_center:.2f}°E, {lat_center:.2f}°N) [Grid idx: {grid_idx}]{event_date_range}')
         ax4.set_ylim(0, global_limits['max_precip'] * 1.1)
         ax4.grid(True, alpha=0.3)
         ax4.legend()
         
         # Format x-axis to show days
-        ax4.xaxis.set_major_locator(mdates.DayLocator(interval=1))  # Show a tick every day
-        ax4.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        # ax4.xaxis.set_major_locator(mdates.DayLocator(interval=1))  # Show a tick every day
+        # ax4.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax4.xaxis.set_major_locator(mdates.MonthLocator())  # Show a tick every month
+        ax4.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
         plt.xticks(rotation=45)
     
     plt.tight_layout()
@@ -541,7 +558,10 @@ def main():
         output_path = f'strong_precip_regions_{sim_name}_{int(args.threshold)}mm{date_range_str}.png'
         
         print(f"\nGenerating plot for {sim_name}")
-        plot_strong_precip_regions(sim_data, args.threshold, global_limits, output_path)
+        
+        # Use first simulation's location for subsequent simulations if specified
+        first_sim_data = all_simulations[0] if args.use_first_location and i > 0 else None
+        plot_strong_precip_regions(sim_data, args.threshold, global_limits, output_path, first_sim_data)
         
         print(f"\nStrong Precipitation Analysis Results for {sim_name}:")
         print(f"Threshold: {args.threshold} mm/day")
